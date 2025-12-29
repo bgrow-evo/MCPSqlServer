@@ -20,6 +20,22 @@ public class JsonRpcHandler
         _debugMode = debugMode;
     }
 
+    private Task<bool> EnsureConnectionStringAsync(object? requestId)
+    {
+        if (!string.IsNullOrWhiteSpace(_connectionString))
+        {
+            return Task.FromResult(true);
+        }
+
+        return FailToolAsync(requestId, "SQL connection string is not configured. Provide appsettings.json next to the server executable (ConnectionStrings:DefaultConnection) or set MCP_SQL_CONNECTION_STRING.");
+    }
+
+    private async Task<bool> FailToolAsync(object? requestId, string message)
+    {
+        await SendErrorResponseAsync(requestId, JsonRpcErrorCodes.InvalidParams, message, isMcpToolCall: true);
+        return false;
+    }
+
     public async Task ProcessRequestAsync(string requestJson)
     {
         try
@@ -46,13 +62,16 @@ public class JsonRpcHandler
                 case "notifications/initialized":
                     await HandleNotificationsInitializedAsync(request);
                     break;
+                case "ping":
+                    await HandlePingAsync(request);
+                    break;
                 case "tools/list":
                     await HandleToolsListAsync(request);
                     break;
                 case "tools/call":
                     if (request.Params == null || !request.Params.TryGetValue("name", out JsonElement toolName))
                     {
-                        await SendErrorResponseAsync(request.Id, JsonRpcErrorCodes.InvalidParams, "Tool name is required", isMcpToolCall: false);
+                        await SendErrorResponseAsync(request.Id, JsonRpcErrorCodes.InvalidParams, "Tool name is required", isMcpToolCall: true);
                         return;
                     }
 
@@ -83,7 +102,7 @@ public class JsonRpcHandler
                             await HandleExecuteProcedureAsync(request);
                             break;
                         default:
-                            await SendErrorResponseAsync(request.Id, JsonRpcErrorCodes.MethodNotFound, $"Unknown tool: {toolName}", isMcpToolCall: false);
+                            await SendErrorResponseAsync(request.Id, JsonRpcErrorCodes.MethodNotFound, $"Unknown tool: {toolName}", isMcpToolCall: true);
                             break;
                     }
                     break;
@@ -104,26 +123,40 @@ public class JsonRpcHandler
 
     private async Task HandleInitializeAsync(JsonRpcRequest request)
     {
-        var capabilities = new
+        string protocolVersion = "2024-11-05";
+        if (request.Params != null
+            && request.Params.TryGetValue("protocolVersion", out JsonElement protocolVersionElement)
+            && protocolVersionElement.ValueKind == JsonValueKind.String)
         {
-            name = "SQL Server MCP",
-            version = "1.0.0",
+            protocolVersion = protocolVersionElement.GetString() ?? protocolVersion;
+        }
+
+        var result = new
+        {
+            protocolVersion,
             capabilities = new
             {
-                databases = true,
-                tables = true,
-                columns = true,
-                procedures = true,
-                queryExecution = true
+                tools = new { listChanged = false }
+            },
+            serverInfo = new
+            {
+                name = "MCPSqlServer",
+                title = "SQL Server MCP",
+                version = "1.0.0"
             }
         };
 
-        await SendSuccessResponseAsync(request.Id, capabilities, isMcpToolCall: false);
+        await SendSuccessResponseAsync(request.Id, result, isMcpToolCall: false);
     }
 
     private async Task HandleNotificationsInitializedAsync(JsonRpcRequest request)
     {
-        // This is a notification method, so we just acknowledge it with an empty object
+        // notifications/initialized is a JSON-RPC notification and MUST NOT be responded to.
+        await Task.CompletedTask;
+    }
+
+    private async Task HandlePingAsync(JsonRpcRequest request)
+    {
         await SendSuccessResponseAsync(request.Id, new { }, isMcpToolCall: false);
     }
 
@@ -134,90 +167,128 @@ public class JsonRpcHandler
             new
             {
                 name = "get_databases",
-                description = "List all available SQL Server databases, response is in jsonrpc 2.0 format",
-                parameters = new { },
-                returns = new {
-                    type = "object, that contains a list of databases"
+                description = "List all available SQL Server databases",
+                inputSchema = new
+                {
+                    type = "object",
+                    properties = new { },
+                    additionalProperties = false
                 }
             },
             new
             {
                 name = "get_tables",
                 description = "List all tables in a specified database",
-                parameters = new
+                inputSchema = new
                 {
-                    database = "Database name",
-                    schema = "Optional schema name, defaults to 'dbo'"
-                },
-                required = new[] { "database" }
+                    type = "object",
+                    properties = new
+                    {
+                        database = new { type = "string", description = "Database name" },
+                        schema = new { type = "string", description = "Optional schema name, defaults to 'dbo'" }
+                    },
+                    required = new[] { "database" },
+                    additionalProperties = false
+                }
             },
             new
             {
                 name = "get_columns",
                 description = "List all columns in a specified table",
-                parameters = new
+                inputSchema = new
                 {
-                    database = "Database name",
-                    schema = "Optional schema name, defaults to 'dbo'",
-                    table = "Table name"
-                },
-                required = new[] { "database", "table" }
+                    type = "object",
+                    properties = new
+                    {
+                        database = new { type = "string", description = "Database name" },
+                        schema = new { type = "string", description = "Optional schema name, defaults to 'dbo'" },
+                        table = new { type = "string", description = "Table name" }
+                    },
+                    required = new[] { "database", "table" },
+                    additionalProperties = false
+                }
             },
             new
             {
                 name = "get_procedures",
                 description = "List all stored procedures in a specified database",
-                parameters = new
+                inputSchema = new
                 {
-                    database = "Database name",
-                    schema = "Optional schema name, defaults to 'dbo'"
-                },
-                required = new[] { "database" }
+                    type = "object",
+                    properties = new
+                    {
+                        database = new { type = "string", description = "Database name" },
+                        schema = new { type = "string", description = "Optional schema name, defaults to 'dbo'" }
+                    },
+                    required = new[] { "database" },
+                    additionalProperties = false
+                }
             },
             new
             {
                 name = "get_procedure_definition",
                 description = "Get the definition of a stored procedure",
-                parameters = new
+                inputSchema = new
                 {
-                    database = "Database name",
-                    schema = "Schema name",
-                    name = "Procedure name"
-                },
-                required = new[] { "database", "schema", "name" }
+                    type = "object",
+                    properties = new
+                    {
+                        database = new { type = "string", description = "Database name" },
+                        schema = new { type = "string", description = "Schema name" },
+                        name = new { type = "string", description = "Procedure name" }
+                    },
+                    required = new[] { "database", "schema", "name" },
+                    additionalProperties = false
+                }
             },
             new
             {
                 name = "execute_procedure",
                 description = "Execute a stored procedure",
-                parameters = new
+                inputSchema = new
                 {
-                    database = "Database name",
-                    procedure = "Procedure name",
-                    parameters = "Dictionary of parameter names and values"
-                },
-                required = new[] { "database", "procedure", "parameters" }
+                    type = "object",
+                    properties = new
+                    {
+                        database = new { type = "string", description = "Database name" },
+                        procedure = new { type = "string", description = "Procedure name" },
+                        schema = new { type = "string", description = "Optional schema name, defaults to 'dbo'" },
+                        parameters = new { type = "object", description = "Key/value input parameters for the stored procedure" }
+                    },
+                    required = new[] { "database", "procedure" },
+                    additionalProperties = false
+                }
             },
             new
             {
                 name = "execute_database_query",
                 description = "Execute a SQL query in the context of a specific database",
-                parameters = new
+                inputSchema = new
                 {
-                    database = "Database name",
-                    query = "SQL query to execute"
-                },
-                required = new[] { "database", "query" }
+                    type = "object",
+                    properties = new
+                    {
+                        database = new { type = "string", description = "Database name" },
+                        query = new { type = "string", description = "SQL query to execute" }
+                    },
+                    required = new[] { "database", "query" },
+                    additionalProperties = false
+                }
             },
             new
             {
                 name = "execute_system_query",
                 description = "Execute a SQL query at the server instance level (no database context required)",
-                parameters = new
+                inputSchema = new
                 {
-                    query = "SQL query to execute"
-                },
-                required = new[] { "query" }
+                    type = "object",
+                    properties = new
+                    {
+                        query = new { type = "string", description = "SQL query to execute" }
+                    },
+                    required = new[] { "query" },
+                    additionalProperties = false
+                }
             }
         };
 
@@ -226,6 +297,11 @@ public class JsonRpcHandler
 
     private async Task HandleGetDatabasesAsync(JsonRpcRequest request)
     {
+        if (!await EnsureConnectionStringAsync(request.Id))
+        {
+            return;
+        }
+
         using SqlConnection connection = new(_connectionString);
         await connection.OpenAsync();
 
@@ -255,6 +331,11 @@ public class JsonRpcHandler
             return;
         }
 
+        if (!await EnsureConnectionStringAsync(request.Id))
+        {
+            return;
+        }
+
         using SqlConnection connection = new(_connectionString);
         await connection.OpenAsync();
 
@@ -267,7 +348,7 @@ public class JsonRpcHandler
         List<TableInfo> tables = [];
 
         using SqlCommand command = new(
-            @"SELECT t.TABLE_SCHEMA, t.TABLE_NAME, t.TABLE_TYPE 
+            @"SELECT t.TABLE_SCHEMA, t.TABLE_NAME, t.TABLE_TYPE
               FROM INFORMATION_SCHEMA.TABLES t
               ORDER BY t.TABLE_SCHEMA, t.TABLE_NAME",
             connection);
@@ -299,8 +380,13 @@ public class JsonRpcHandler
             return;
         }
 
+        if (!await EnsureConnectionStringAsync(request.Id))
+        {
+            return;
+        }
+
         string schema = "dbo";
-        if (request.Params.TryGetValue("schema", out JsonElement schemaParam))
+        if (args.TryGetProperty("schema", out JsonElement schemaParam) && schemaParam.ValueKind == JsonValueKind.String)
         {
             schema = schemaParam.ToString();
         }
@@ -317,7 +403,7 @@ public class JsonRpcHandler
         List<ColumnInfo> columns = [];
 
         using SqlCommand command = new(
-            @"SELECT 
+            @"SELECT
                 c.COLUMN_NAME,
                 c.DATA_TYPE,
                 c.CHARACTER_MAXIMUM_LENGTH,
@@ -333,7 +419,7 @@ public class JsonRpcHandler
                 JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
                     ON tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
                     AND tc.CONSTRAINT_NAME = ku.CONSTRAINT_NAME
-            ) pk 
+            ) pk
                 ON c.TABLE_CATALOG = pk.TABLE_CATALOG
                 AND c.TABLE_SCHEMA = pk.TABLE_SCHEMA
                 AND c.TABLE_NAME = pk.TABLE_NAME
@@ -375,6 +461,11 @@ public class JsonRpcHandler
             return;
         }
 
+        if (!await EnsureConnectionStringAsync(request.Id))
+        {
+            return;
+        }
+
         using SqlConnection connection = new(_connectionString);
         await connection.OpenAsync();
 
@@ -387,7 +478,7 @@ public class JsonRpcHandler
         List<ProcedureInfo> procedures = [];
 
         using SqlCommand command = new(
-            @"SELECT 
+            @"SELECT
                 SCHEMA_NAME(p.schema_id) as [Schema],
                 p.name as [Name]
             FROM sys.procedures p
@@ -420,6 +511,11 @@ public class JsonRpcHandler
             return;
         }
 
+        if (!await EnsureConnectionStringAsync(request.Id))
+        {
+            return;
+        }
+
         using SqlConnection connection = new(_connectionString);
         await connection.OpenAsync();
 
@@ -430,7 +526,7 @@ public class JsonRpcHandler
         }
 
         using SqlCommand command = new(
-            @"SELECT 
+            @"SELECT
                 pm.definition as [Definition]
             FROM sys.procedures p
             INNER JOIN sys.sql_modules pm ON p.object_id = pm.object_id
@@ -463,6 +559,11 @@ public class JsonRpcHandler
             return;
         }
 
+        if (!await EnsureConnectionStringAsync(request.Id))
+        {
+            return;
+        }
+
         using SqlConnection connection = new(_connectionString);
         await connection.OpenAsync();
 
@@ -489,6 +590,11 @@ public class JsonRpcHandler
             return;
         }
 
+        if (!await EnsureConnectionStringAsync(request.Id))
+        {
+            return;
+        }
+
         using SqlConnection connection = new(_connectionString);
         await connection.OpenAsync();
 
@@ -511,14 +617,19 @@ public class JsonRpcHandler
             return;
         }
 
+        if (!await EnsureConnectionStringAsync(request.Id))
+        {
+            return;
+        }
+
         string schema = "dbo";
-        if (request.Params.TryGetValue("schema", out JsonElement schemaParam))
+        if (args.TryGetProperty("schema", out JsonElement schemaParam) && schemaParam.ValueKind == JsonValueKind.String)
         {
             schema = schemaParam.ToString();
         }
 
         Dictionary<string, JsonElement>? parameters = null;
-        if (request.Params.TryGetValue("parameters", out JsonElement parametersParam))
+        if (args.TryGetProperty("parameters", out JsonElement parametersParam) && parametersParam.ValueKind == JsonValueKind.Object)
         {
             parameters = parametersParam.Deserialize<Dictionary<string, JsonElement>>();
         }
@@ -618,7 +729,6 @@ public class JsonRpcHandler
             response = new JsonRpcResponse
             {
                 Id = id,
-                Error = new JsonRpcError { Code = code, Message = message },
                 Result = new McpToolResult
                 {
                     Content =

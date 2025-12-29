@@ -34,6 +34,8 @@ public class Program
             var (connectionString, debugMode, logPath) = LoadConfiguration();
             Console.Error.WriteLine($"Log path: {logPath}");
 
+            Directory.CreateDirectory(logPath);
+
             var (readLogWriter, writeLogWriterTemp) = InitializeLogFiles(logPath);
             writeLogWriter = writeLogWriterTemp;
 
@@ -81,17 +83,27 @@ public class Program
         // Load configuration from appsettings.json
         IConfigurationRoot configuration = new ConfigurationBuilder()
             .SetBasePath(AppContext.BaseDirectory)
-            .AddJsonFile("appsettings.json", optional: false)
+            .AddJsonFile("appsettings.json", optional: true)
             .Build();
         Console.Error.WriteLine("Configuration loaded");
 
         // Get connection string from configuration
         string? connectionString = configuration.GetConnectionString("DefaultConnection");
-        if (string.IsNullOrEmpty(connectionString))
+        if (string.IsNullOrWhiteSpace(connectionString))
         {
-            throw new InvalidOperationException("Connection string 'DefaultConnection' not found in appsettings.json");
+            connectionString = Environment.GetEnvironmentVariable("MCP_SQL_CONNECTION_STRING")
+                ?? Environment.GetEnvironmentVariable("MSSQL_CONNECTION_STRING")
+                ?? Environment.GetEnvironmentVariable("ConnectionStrings__DefaultConnection");
         }
-        Console.Error.WriteLine("Connection string found");
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            connectionString = string.Empty;
+            Console.Error.WriteLine("Connection string not configured (appsettings.json missing/empty and no env var found). MCP will initialize, but DB tools will fail until configured.");
+        }
+        else
+        {
+            Console.Error.WriteLine("Connection string found");
+        }
 
         // Get debug mode setting
         var debugMode = configuration["DebugMode"]?.ToLowerInvariant() is "true";
